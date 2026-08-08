@@ -1,0 +1,12 @@
+route:
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+  # Fuer den PoC werden Alerts nur in der Alertmanager-UI sichtbar gemacht.
+  # Die Default-Config des Images zeigt auf einen Webhook auf 127.0.0.1:5001,
+  # der nicht existiert und die Logs mit Zustellfehlern flutet.
+  receiver: 'null'
+
+receivers:
+  - name: 'null'

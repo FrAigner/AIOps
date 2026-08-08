@@ -1,0 +1,534 @@
+groups:
+  # ---------------------------------------------------------------------------
+  # 1. Recording Rules - verdichten die Rohmetriken zu SLI-Zeitreihen.
+  #    Sie werden per -remoteWrite.url zurueck nach VictoriaMetrics geschrieben
+  #    und sind damit auch im Dashboard direkt abfragbar.
+  # ---------------------------------------------------------------------------
+  - name: sli-recording
+    interval: 15s
+    rules:
+      - record: poc:requests:rate5m
+        expr: sum by (job) (rate(http_server_duration_milliseconds_count[5m]))
+
+      - record: poc:errors:rate5m
+        expr: sum by (job) (rate(http_server_duration_milliseconds_count{http_status_code=~"5.."}[5m]))
+
+      - record: poc:error_ratio:5m
+        expr: >-
+          sum by (job) (rate(http_server_duration_milliseconds_count{http_status_code=~"5.."}[5m]))
+          / clamp_min(sum by (job) (rate(http_server_duration_milliseconds_count[5m])), 0.001)
+
+      - record: poc:error_ratio:30m
+        expr: >-
+          sum by (job) (rate(http_server_duration_milliseconds_count{http_status_code=~"5.."}[30m]))
+          / clamp_min(sum by (job) (rate(http_server_duration_milliseconds_count[30m])), 0.001)
+
+      - record: poc:availability:5m
+        expr: 1 - poc:error_ratio:5m
+
+      - record: poc:latency_p95:5m
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (le, job) (rate(http_server_duration_milliseconds_bucket[5m])))
+
+      - record: poc:latency_p99:5m
+        expr: >-
+          histogram_quantile(0.99,
+            sum by (le, job) (rate(http_server_duration_milliseconds_bucket[5m])))
+
+      - record: poc:dependency_p95:5m
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (le, dependency, job) (rate(dependency_duration_milliseconds_bucket[5m])))
+
+      # Geschaeftskennzahl als SLI: abgeschlossene Bestellungen pro Sekunde.
+      # Wird unten gegen das gelernte Tagesprofil geprueft - der Ausfall, den
+      # weder Fehlerrate noch Latenz sehen.
+      - record: poc:orders:rate5m
+        expr: sum by (job) (rate(orders_created_total[5m]))
+
+      # Dieselbe Idee fuer die Filiale: abgeschlossene Kassenvorgaenge. Job-generisch
+      # zusammengefasst (jede Anwendung liefert nur ihre eigene Kennzahl), damit
+      # ein einziger Satz saisonaler Regeln beide Apps abdeckt, statt die
+      # Geschaeftslogik-Alarme doppelt zu pflegen.
+      - record: poc:business_txn:rate5m
+        expr: >-
+          sum by (job) (rate(orders_created_total[5m]))
+          or sum by (job) (rate(pos_transactions_total[5m]))
+
+  # ---------------------------------------------------------------------------
+  # 2. Saisonales Lernen - das Tagesprofil.
+  #
+  #    Warum ueberhaupt: gemessen ueber 17 Stunden Normalbetrieb schwankt der
+  #    Traffic dieses Shops um Faktor 12 (05:00 = 0,5 req/s, 14:00 = 6,4 req/s)
+  #    und der Gesamt-P95 um Faktor 2,25 (247 ms nachts, 555 ms mittags - nachts
+  #    wird gestoebert, tagsueber gekauft, der Mix verschiebt sich).
+  #    Ein gleitendes Ein-Stunden-Fenster kann diese Dimension grundsaetzlich
+  #    nicht bewerten: um 06:00 verdreifacht sich der Traffic voellig regulaer
+  #    innerhalb einer Stunde. Wer darauf einen Schwellwert setzt, bekommt jeden
+  #    Morgen einen Fehlalarm - und sieht abends nicht, dass der Shop tot ist.
+  #
+  #    Deshalb hier ein zweites, langsames Gedaechtnis: der Vergleich mit der
+  #    gleichen Uhrzeit an den Vortagen und am Vortag der Vorwoche.
+  #
+  #    Aufbau der Ausdruecke:
+  #      - Jeder Lag wird per label_set unterscheidbar gemacht und mit "or"
+  #        zu einer Menge vereinigt; avg by (job) mittelt anschliessend ueber
+  #        genau die Lags, die tatsaechlich Daten haben.
+  #        Dadurch waechst die Genauigkeit von selbst: am ersten Tag traegt nur
+  #        der 1d-Lag bei, nach einer Woche alle vier.
+  #      - "[30m:1m] offset 23h45m" liest ein halbstuendiges Fenster, das um
+  #        exakt 24 Stunden zurueck zentriert ist. Die Breite faengt ab, dass
+  #        sich Tagesrhythmen nie auf die Minute wiederholen.
+  #      - Die Alarm-Maske ist dieselbe wie beim gleitenden Fenster: ein Tag mit
+  #        Stoerung darf nicht zum Massstab fuer den naechsten werden.
+  #      - Faellt das saisonale Profil aus (zu wenig Historie), greift ueber
+  #        "default" weiterhin das gleitende Fenster. Der Detektor wird dadurch
+  #        nie schlechter als vorher, nur besser.
+  # ---------------------------------------------------------------------------
+  - name: seasonal-learning
+    interval: 30s
+    rules:
+      - record: poc:requests:seasonal
+        expr: >-
+          avg by (job) (
+            label_set(avg_over_time((poc:requests:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 23h45m), "lag", "1d")
+            or
+            label_set(avg_over_time((poc:requests:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 47h45m), "lag", "2d")
+            or
+            label_set(avg_over_time((poc:requests:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 71h45m), "lag", "3d")
+            or
+            label_set(avg_over_time((poc:requests:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 167h45m), "lag", "7d")
+          )
+
+      # Lernfortschritt, sichtbar gemacht: wie viele Vergleichstage stehen fuer
+      # diese Uhrzeit bereits zur Verfuegung (0 bis 4). Das ist die Zahl, die im
+      # Dashboard zeigt, dass das System nicht statisch ist.
+      # Der "or"-Zweig liefert 0 statt einer Luecke, solange gar nichts da ist.
+      - record: poc:learning:profile_days
+        expr: >-
+          count by (job) (
+            label_set(avg_over_time(poc:requests:rate5m[30m:1m] offset 23h45m), "lag", "1d")
+            or
+            label_set(avg_over_time(poc:requests:rate5m[30m:1m] offset 47h45m), "lag", "2d")
+            or
+            label_set(avg_over_time(poc:requests:rate5m[30m:1m] offset 71h45m), "lag", "3d")
+            or
+            label_set(avg_over_time(poc:requests:rate5m[30m:1m] offset 167h45m), "lag", "7d")
+          )
+          or (0 * poc:requests:rate5m)
+
+      # Ist-Traffic im Verhaeltnis zum gelernten Profil. 1.0 = wie erwartet.
+      - record: poc:requests:seasonal_ratio
+        expr: poc:requests:rate5m / clamp_min(poc:requests:seasonal, 0.05)
+
+      - record: poc:orders:seasonal
+        expr: >-
+          avg by (job) (
+            label_set(avg_over_time((poc:orders:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 23h45m), "lag", "1d")
+            or
+            label_set(avg_over_time((poc:orders:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 47h45m), "lag", "2d")
+            or
+            label_set(avg_over_time((poc:orders:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 71h45m), "lag", "3d")
+            or
+            label_set(avg_over_time((poc:orders:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 167h45m), "lag", "7d")
+          )
+
+      - record: poc:orders:seasonal_ratio
+        expr: poc:orders:rate5m / clamp_min(poc:orders:seasonal, 0.02)
+
+      # Dieselbe Berechnung ueber die job-generische Kennzahl - deckt damit
+      # automatisch auch die Filiale ab (Kassenvorgaenge statt Bestellungen).
+      - record: poc:business_txn:seasonal
+        expr: >-
+          avg by (job) (
+            label_set(avg_over_time((poc:business_txn:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 23h45m), "lag", "1d")
+            or
+            label_set(avg_over_time((poc:business_txn:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 47h45m), "lag", "2d")
+            or
+            label_set(avg_over_time((poc:business_txn:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 71h45m), "lag", "3d")
+            or
+            label_set(avg_over_time((poc:business_txn:rate5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 167h45m), "lag", "7d")
+          )
+
+      - record: poc:business_txn:seasonal_ratio
+        expr: poc:business_txn:rate5m / clamp_min(poc:business_txn:seasonal, 0.02)
+
+      - record: poc:latency_p95:seasonal
+        expr: >-
+          avg by (job) (
+            label_set(avg_over_time((poc:latency_p95:5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 23h45m), "lag", "1d")
+            or
+            label_set(avg_over_time((poc:latency_p95:5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 47h45m), "lag", "2d")
+            or
+            label_set(avg_over_time((poc:latency_p95:5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 71h45m), "lag", "3d")
+            or
+            label_set(avg_over_time((poc:latency_p95:5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[30m:1m] offset 167h45m), "lag", "7d")
+          )
+
+  # ---------------------------------------------------------------------------
+  # 3. Baseline & Anomalie-Score - das kurzfristige Gedaechtnis.
+  #    Statt fester Schwellwerte wird die aktuelle Latenz gegen ihr eigenes
+  #    gleitendes Mittel normiert (Z-Score). Erkennt den Bruch im Verhalten
+  #    innerhalb von Minuten; das saisonale Profil aus Gruppe 2 liefert dazu
+  #    den Massstab, sobald genug Historie da ist.
+  # ---------------------------------------------------------------------------
+  - name: anomaly-detection
+    interval: 15s
+    rules:
+      # Wichtig: Das Lernfenster ist um 5 Minuten nach hinten versetzt.
+      # Ohne diesen Versatz frisst eine laufende Stoerung ihre eigene Baseline
+      # auf, der Score sinkt wieder und der Alarm loest sich selbst auf,
+      # obwohl das Problem noch besteht.
+      # Trade-off: Haelt eine Stoerung laenger als ~5 Minuten an, waechst die
+      # Baseline langsam mit. Fuer Dauerzustaende sind HighErrorRate und
+      # DependencyDegraded zustaendig - der Z-Score ist der Detektor fuer den
+      # Bruch im Verhalten, nicht fuer den Dauerbetrieb. In Produktion nimmt
+      # man hier ein saisonales Fenster (gleiche Uhrzeit der Vorwoche).
+      # Die default-Kette ist die Ausbaustufe: das saisonale Profil hat Vorrang,
+      # weil es die Tageszeit kennt. Erst wenn dafuer keine Historie da ist,
+      # faellt die Regel auf das gleitende Fenster zurueck, dann auf den
+      # Ist-Wert. Ergebnis: der Detektor verhaelt sich am ersten Tag exakt wie
+      # bisher und wird ab dem zweiten Tag praeziser, ohne dass jemand etwas
+      # umstellen muss.
+      - record: poc:latency_p95:baseline
+        expr: >-
+          poc:latency_p95:seasonal
+          default avg_over_time(poc:latency_p95:5m[15m] offset 5m)
+          default avg_over_time(poc:latency_p95:5m[15m])
+          default poc:latency_p95:5m
+
+      - record: poc:latency_p95:stddev
+        expr: >-
+          stddev_over_time(poc:latency_p95:5m[15m] offset 5m)
+          default stddev_over_time(poc:latency_p95:5m[15m])
+          default 0
+
+      # Abweichung in Standardabweichungen. clamp_min verhindert, dass eine
+      # sehr ruhige Baseline den Score kuenstlich explodieren laesst.
+      - record: poc:latency_p95:zscore
+        expr: >-
+          (poc:latency_p95:5m - poc:latency_p95:baseline)
+          / clamp_min(poc:latency_p95:stddev, 20)
+
+      # Dasselbe Verfahren je Endpunkt. Das ist der wichtigere Detektor:
+      # ein aggregiertes P95 ueber alle Endpunkte sieht eine Stoerung nicht,
+      # die nur einen kleinen Teil des Traffics trifft. Gemessen: bei einer
+      # Stoerung der Zahlungsstrecke lag /api/checkout bei 2425 ms, waehrend
+      # der Gesamt-P95 bei 248 ms blieb - Checkout macht nachts nur gut 3 %
+      # der Requests aus und faellt damit unter das 95. Perzentil.
+      # Bewusst der Mittelwert, nicht das Perzentil: einzelne Endpunkte bekommen
+      # in einem 5-Minuten-Fenster teils nur zehn Requests. Ein 95. Perzentil
+      # ist dann faktisch "der langsamste Request" und springt bei einem
+      # einzigen Ausreisser um Sekunden. Der Mittelwert bleibt stabil.
+      - record: poc:route_latency_avg:5m
+        expr: >-
+          sum by (job, http_target) (rate(http_server_duration_milliseconds_sum[5m]))
+          / clamp_min(
+              sum by (job, http_target) (rate(http_server_duration_milliseconds_count[5m])),
+            0.001)
+
+      # Waehrend eines Alarms wird nicht gelernt. Ohne diese Maske frisst eine
+      # wiederkehrende Stoerung ihre eigene Baseline auf: gemessen lag die
+      # Baseline nach drei Stoerungen in 45 Minuten bei 1006 ms statt bei den
+      # tatsaechlichen ~610 ms, und der Detektor meldete nichts mehr.
+      # Mit Maske: 614 ms - obwohl nur 21,7 % der Stunde alarmfrei waren.
+      # Der 5-Minuten-Versatz deckt zusaetzlich die Anlaufzeit ab, in der eine
+      # Stoerung schon laeuft, der Alarm aber noch nicht bestaetigt ist.
+      #
+      # Nebenwirkung, die man kennen muss: haengt ein Alarm dauerhaft, friert
+      # die Baseline auf ihrem letzten gesunden Stand ein. Das ist gewollt -
+      # ein kaputter Zustand soll nicht zum neuen Normal werden.
+      # Die Maske steht bewusst inline in der Subquery und nicht als eigene
+      # Recording Rule: so wird sie rueckwirkend ueber die vorhandene Historie
+      # ausgewertet und ist sofort wirksam, statt erst eine Stunde Vorlauf zu
+      # brauchen.
+      - record: poc:route_latency_avg:baseline
+        expr: >-
+          avg_over_time((poc:route_latency_avg:5m
+            unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[1h:1m] offset 5m)
+          default avg_over_time(poc:route_latency_avg:5m[15m])
+          default poc:route_latency_avg:5m
+
+      - record: poc:route_latency_avg:spread
+        expr: >-
+          clamp_min(
+            stddev_over_time((poc:route_latency_avg:5m
+              unless on(job) (count by (job) (ALERTS{alertstate="firing"})))[1h:1m] offset 5m)
+            default stddev_over_time(poc:route_latency_avg:5m[15m])
+            default 0,
+          10)
+
+      - record: poc:route_latency_avg:zscore
+        expr: >-
+          (poc:route_latency_avg:5m - poc:route_latency_avg:baseline)
+          / poc:route_latency_avg:spread
+
+      - record: poc:route_requests:rate5m
+        expr: sum by (job, http_target) (rate(http_server_duration_milliseconds_count[5m]))
+
+      - record: poc:error_ratio:baseline
+        expr: >-
+          avg_over_time(poc:error_ratio:5m[15m] offset 5m)
+          default avg_over_time(poc:error_ratio:5m[15m])
+          default poc:error_ratio:5m
+
+      - record: poc:error_ratio:zscore
+        expr: >-
+          (poc:error_ratio:5m - poc:error_ratio:baseline)
+          / clamp_min(
+              stddev_over_time(poc:error_ratio:5m[15m] offset 5m)
+              default stddev_over_time(poc:error_ratio:5m[15m])
+              default 0,
+            0.005)
+
+      # Kombinierter Health-Score 0-100 fuer die Management-Sicht.
+      - record: poc:health_score
+        expr: >-
+          clamp_min(100
+            - 100 * clamp_max(poc:error_ratio:5m / 0.05, 1) * 0.6
+            - 100 * clamp_max(clamp_min(poc:latency_p95:zscore, 0) / 6, 1) * 0.4, 0)
+
+  # ---------------------------------------------------------------------------
+  # 4. Alerts
+  # ---------------------------------------------------------------------------
+  - name: app-errors
+    interval: 15s
+    rules:
+      - alert: HighErrorRate
+        # Der OTel-FastAPI-Instrumentor exportiert "http.server.duration" in ms,
+        # ueber prometheusremotewrite wird daraus http_server_duration_milliseconds_count.
+        expr: poc:error_ratio:5m > 0.05
+        for: 30s
+        labels:
+          severity: critical
+          signal: errors
+        annotations:
+          summary: "{{ $labels.job }}: Fehlerrate {{ $value | humanizePercentage }}"
+          description: "Die Fehlerrate liegt ueber dem SLO-Ziel von 99.5% Verfuegbarkeit."
+
+      - alert: ErrorBudgetBurnFast
+        # Multi-Window-Burn-Rate: 14.4x Verbrauch bedeutet, das 30-Tage-Budget
+        # waere in ~2 Tagen aufgebraucht. Klassisches Google-SRE-Muster.
+        expr: poc:error_ratio:5m > (14.4 * 0.005) and poc:error_ratio:30m > (6 * 0.005)
+        for: 1m
+        labels:
+          severity: critical
+          signal: slo
+        annotations:
+          summary: "{{ $labels.job }}: Error Budget brennt 14x zu schnell"
+          description: "Bei gleichbleibender Rate ist das monatliche Fehlerbudget in unter 2 Tagen verbraucht."
+
+      - alert: LatencyAnomalyDetected
+        # Kein fester Schwellwert - Ausschlag gegen die selbst gelernte Baseline.
+        #
+        # Die Schwelle muss ueber dem normalen Rauschen liegen. Gemessen an
+        # diesem Workload (Poisson-Ankuenfte, sehr unterschiedlich lange
+        # Journeys) liegt der Z-Score im Normalbetrieb im 95. Perzentil bereits
+        # bei ~5,5 - eine 3-Sigma-Schwelle wuerde dauernd feuern.
+        #
+        # Statistische Signifikanz allein reicht nicht, es braucht auch
+        # praktische Relevanz. Deshalb drei Bedingungen zusammen:
+        #   1. deutlicher Ausschlag gegen die Baseline (Z-Score)
+        #   2. die Latenz hat sich real spuerbar verschlechtert (Faktor 1,75)
+        #   3. sie ist absolut hoch genug, dass es jemanden stoert (700 ms)
+        #
+        # Die 700 ms sind gemessen, nicht geraten: im Normalbetrieb erreicht
+        # P95 dieses Workloads Spitzen bis 573 ms, die Chaos-Szenarien liegen
+        # bei 1200-1900 ms. Ein Backtest ueber 2 Stunden Normalbetrieb ergibt
+        # damit null Fehlalarme.
+        expr: >-
+          poc:latency_p95:zscore > 8
+          and poc:latency_p95:5m > 1.75 * poc:latency_p95:baseline
+          and poc:latency_p95:5m > 700
+        for: 3m
+        labels:
+          severity: warning
+          signal: latency
+          detector: zscore
+        annotations:
+          summary: "{{ $labels.job }}: Latenz-Anomalie, {{ $value | humanize }} Sigma ueber der Baseline"
+          description: "Die P95-Latenz weicht signifikant vom gelernten Normalverhalten der letzten 15 Minuten ab."
+
+      - alert: RouteLatencyAnomaly
+        # Der empfindliche Detektor: schlaegt an, sobald ein einzelner Endpunkt
+        # aus seinem Rahmen faellt - auch wenn er nur wenige Prozent des
+        # Gesamttraffics ausmacht.
+        # Die Traffic-Bedingung haelt Endpunkte draussen, die so selten
+        # aufgerufen werden, dass ihr P95 reines Rauschen waere.
+        expr: >-
+          poc:route_latency_avg:zscore > 6
+          and poc:route_latency_avg:5m > 1.6 * poc:route_latency_avg:baseline
+          and poc:route_latency_avg:5m > 250
+          and poc:route_requests:rate5m > 0.01
+        for: 2m
+        labels:
+          severity: warning
+          signal: latency
+          detector: zscore-route
+        annotations:
+          summary: "{{ $labels.job }}: Endpunkt {{ $labels.http_target }} ist ungewoehnlich langsam"
+          description: "{{ $value | humanize }} Sigma ueber dem Normalverhalten dieses Endpunkts."
+
+      - alert: DependencyDegraded
+        # Zeigt direkt den Verursacher - das ist der Root-Cause-Hinweis fuer den Betrieb.
+        expr: poc:dependency_p95:5m > 500
+        for: 1m
+        labels:
+          severity: warning
+          signal: dependency
+        annotations:
+          summary: "{{ $labels.job }}: Downstream '{{ $labels.dependency }}' antwortet langsam ({{ $value | humanize }} ms P95)"
+          description: "Wahrscheinlicher Verursacher der Latenz-Anomalie: {{ $labels.dependency }}."
+
+      - alert: NoTrafficReceived
+        expr: poc:requests:rate5m < 0.05
+        for: 2m
+        labels:
+          severity: warning
+          signal: traffic
+        annotations:
+          summary: "{{ $labels.job }}: kein Traffic mehr"
+          description: "Seit 2 Minuten kommen praktisch keine Requests an - moeglicher Ausfall des Ingress oder der Instanz."
+
+  # ---------------------------------------------------------------------------
+  # 5. Alerts gegen das gelernte Tagesprofil.
+  #    Diese Detektoren sehen etwas, das Fehlerrate und Latenz strukturell nicht
+  #    sehen koennen: einen Betrieb, der technisch einwandfrei laeuft, aber zur
+  #    falschen Tageszeit die falsche Menge Arbeit macht. Ein Shop, der um 20:00
+  #    keine Bestellungen mehr annimmt, hat null Fehler und perfekte Latenz.
+  #    Jede Regel ist dreifach abgesichert:
+  #      1. relative Abweichung vom gelernten Profil
+  #      2. ein absoluter Boden, damit die stille Nacht nicht dauernd meldet
+  #      3. profile_days > 0 - ohne Historie wird nicht geraten
+  # ---------------------------------------------------------------------------
+  - name: seasonal-alerts
+    interval: 30s
+    rules:
+      - alert: TrafficBelowProfile
+        expr: >-
+          poc:requests:seasonal_ratio < 0.5
+          and poc:requests:seasonal > 1
+          and poc:learning:profile_days > 0
+        for: 5m
+        labels:
+          severity: critical
+          signal: traffic
+          detector: seasonal
+        annotations:
+          summary: "{{ $labels.job }}: nur {{ $value | humanizePercentage }} des ueblichen Traffics"
+          description: "Zu dieser Uhrzeit werden deutlich mehr Requests erwartet. Technisch ist alles gruen - es kommt schlicht keine Last an."
+
+      - alert: TrafficAboveProfile
+        # Gegenrichtung: Retry-Sturm, Bot-Welle oder ein Batch, der versehentlich
+        # zur Hauptlastzeit laeuft.
+        expr: >-
+          poc:requests:seasonal_ratio > 2.5
+          and poc:requests:rate5m > 3
+          and poc:learning:profile_days > 0
+        for: 5m
+        labels:
+          severity: warning
+          signal: traffic
+          detector: seasonal
+        annotations:
+          summary: "{{ $labels.job }}: {{ $value | humanize }}-facher Traffic gegenueber dem Tagesprofil"
+          description: "Ungewoehnlich hohe Last fuer diese Uhrzeit - moeglicher Retry-Sturm, Bot-Traffic oder ein fehlgeplanter Batchlauf."
+
+      - alert: OrderVolumeAnomaly
+        # Der Alarm, den das Management versteht: es geht um Umsatz, nicht um
+        # Millisekunden. Bewusst laenger als die technischen Detektoren gehalten
+        # (10 Minuten), weil Bestellzahlen von Natur aus stark streuen.
+        expr: >-
+          poc:orders:seasonal_ratio < 0.4
+          and poc:orders:seasonal > 0.05
+          and poc:learning:profile_days > 0
+        for: 10m
+        labels:
+          severity: critical
+          signal: business
+          detector: seasonal
+        annotations:
+          summary: "{{ $labels.job }}: Bestelleingang bei {{ $value | humanizePercentage }} des Normalwerts"
+          description: "Zu dieser Uhrzeit werden deutlich mehr Bestellungen erwartet. Geschaeftsrelevanter Ausfall, unabhaengig vom technischen Zustand."
+
+      - alert: POSVolumeAnomaly
+        # Filial-Pendant zu OrderVolumeAnomaly, auf derselben job-generischen
+        # Kennzahl (poc:business_txn:*), aber bewusst auf store-api eingegrenzt -
+        # sonst wuerde der Shop doppelt gemeldet (dort feuert bereits
+        # OrderVolumeAnomaly auf denselben Rohdaten). Fuer store-api heisst das:
+        # Kassen schlagen keine Vorgaenge mehr durch, obwohl die Oeffnungszeit
+        # laut Profil laeuft - z. B. Kassensystem haengt, Netzwerk zur Filiale
+        # tot. Feuert nicht ausserhalb der gelernten Geschaeftszeiten, weil
+        # dort auch das Profil selbst gegen Null geht.
+        expr: >-
+          poc:business_txn:seasonal_ratio{job="store-api"} < 0.4
+          and poc:business_txn:seasonal{job="store-api"} > 0.05
+          and poc:learning:profile_days{job="store-api"} > 0
+        for: 10m
+        labels:
+          severity: critical
+          signal: business
+          detector: seasonal
+        annotations:
+          summary: "{{ $labels.job }}: Vorgänge bei {{ $value | humanizePercentage }} des Normalwerts"
+          description: "Zu dieser Uhrzeit werden deutlich mehr Kassen-/Bestellvorgaenge erwartet. Geschaeftsrelevanter Ausfall, unabhaengig vom technischen Zustand."
+
+  # ---------------------------------------------------------------------------
+  # 6. ML-gestuetzte Anomalie-Erkennung (services/ml-anomaly, MSTL-Dekomposition
+  #    aus statsmodels: Trend + taegliche und - sobald genug Historie da ist -
+  #    woechentliche Saisonalitaet). Laeuft parallel zur handgebauten
+  #    Lag-Mittelwert-Heuristik oben (Gruppe seasonal-learning), ersetzt sie
+  #    nicht - im Demo laesst sich damit "einfache MetricsQL-Heuristik vs.
+  #    echtes statistisches Modell" direkt vergleichen.
+  #
+  #    Kaltstart-Schutz ist strukturell, kein Guard-Ausdruck noetig: solange
+  #    services/ml-anomaly keine ml:*-Reihe fuer ein (job)-Label geschrieben
+  #    hat, existiert die rechte Seite des Vergleichs schlicht nicht - der
+  #    Vektor-Join liefert dann keine Zeitreihe und der Alarm kann nicht
+  #    feuern. Derselbe Trick wie bei den saisonalen Alarmen oben, nur ohne
+  #    das explizite ">0"-Gate, weil hier gar keine Reihe statt einer Reihe
+  #    mit Wert 0 fehlt.
+  # ---------------------------------------------------------------------------
+  - name: ml-anomaly-alerts
+    interval: 30s
+    rules:
+      - alert: MLAnomalyDetected
+        expr: poc:latency_p95:5m > ml:latency_p95:5m:upper
+        for: 3m
+        labels:
+          severity: warning
+          signal: latency
+          detector: ml-mstl
+        annotations:
+          summary: "{{ $labels.job }}: Latenz {{ $value | humanize }} ms ueber ML-Prognoseband"
+          description: "Die MSTL-Dekomposition (Tages-/Wochenmuster) erwartet hier einen anderen Wert. Vergleich zur Heuristik: siehe LatencyAnomalyDetected."
+
+      - alert: MLTrafficAnomalyDetected
+        expr: >-
+          poc:requests:rate5m > ml:requests:rate5m:upper
+          or poc:requests:rate5m < ml:requests:rate5m:lower
+        for: 5m
+        labels:
+          severity: warning
+          signal: traffic
+          detector: ml-mstl
+        annotations:
+          summary: "{{ $labels.job }}: Traffic ausserhalb des ML-Prognosebands"
+          description: "Abweichung vom durch MSTL gelernten Tages-/Wochenmuster, unabhaengig vom technischen Zustand."

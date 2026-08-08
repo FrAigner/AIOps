@@ -1,0 +1,254 @@
+services:
+  poc-api:
+    build: ./app
+    depends_on:
+      - otel-collector
+    ports:
+      - "8000:8000"
+    environment:
+      - OTEL_SERVICE_NAME=poc-api
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      # Default sind 60s - zu grob fuer rate()-Fenster von 5min und traege im Dashboard.
+      - OTEL_METRIC_EXPORT_INTERVAL=15000
+      - OTEL_BSP_SCHEDULE_DELAY=2000
+    command: ["opentelemetry-instrument", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks:
+      - o11y-net
+
+  loadgen:
+    build: ./app
+    command: ["python", "loadgen.py"]
+    depends_on:
+      - poc-api
+    environment:
+      - TARGET_URL=http://poc-api:8000
+      # Spitzenlast am Abend; der Tagesverlauf skaliert davon herunter.
+      - LOADGEN_PEAK_RPS=6.0
+      - LOADGEN_MAX_INFLIGHT=24
+      # Auf z.B. 1800 setzen, um 24 Stunden Tagesverlauf in 30 Minuten zu zeigen.
+      - LOADGEN_DAY_SECONDS=86400
+    networks:
+      - o11y-net
+
+  store-api:
+    build: ./app
+    depends_on:
+      - otel-collector
+    ports:
+      - "8001:8001"
+    environment:
+      - OTEL_SERVICE_NAME=store-api
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_METRIC_EXPORT_INTERVAL=15000
+      - OTEL_BSP_SCHEDULE_DELAY=2000
+      - SHOP_URL=http://poc-api:8000
+    command:
+      ["opentelemetry-instrument", "uvicorn", "store_main:app", "--host", "0.0.0.0", "--port", "8001"]
+    networks:
+      - o11y-net
+
+  store-loadgen:
+    build: ./app
+    command: ["python", "store_loadgen.py"]
+    depends_on:
+      - store-api
+    environment:
+      - TARGET_URL=http://store-api:8001
+      - LOADGEN_PEAK_RPS=4.0
+      - LOADGEN_MAX_INFLIGHT=16
+      - LOADGEN_DAY_SECONDS=86400
+      - STORE_OPENING_HOUR=7
+      - STORE_CLOSING_HOUR=20
+    networks:
+      - o11y-net
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector.yaml"]
+    depends_on:
+      - tempo
+      - loki
+      - victoriametrics
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otel-collector.yaml
+    ports:
+      - "4317:4317"   # OTLP/gRPC
+      - "4318:4318"   # OTLP/HTTP
+    networks:
+      - o11y-net
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    ports:
+      - "8428:8428"
+    command:
+      # Aufbewahrung ist die Voraussetzung fuers Lernen, kein Detail:
+      # das saisonale Tagesprofil vergleicht mit den Vortagen und mit dem
+      # Vortag der Vorwoche. Mit den urspruenglichen 1d Aufbewahrung war der
+      # aelteste Vergleichswert immer schon geloescht, bevor er gebraucht wurde
+      # - das Profil konnte gar nicht entstehen.
+      - "-retentionPeriod=30d"
+    volumes:
+      # Ohne benanntes Volume liegt die gesamte Historie in der Container-Schicht
+      # und ist bei jedem "up --force-recreate" weg. Ein System, das ueber Tage
+      # lernen soll, darf sein Gedaechtnis nicht beim Neustart verlieren.
+      - vmdata:/victoria-metrics-data
+    networks:
+      - o11y-net
+
+  vmalert:
+    image: victoriametrics/vmalert:latest
+    depends_on:
+      - victoriametrics
+    ports:
+      - "8880:8880"
+    command:
+      - "-rule=/etc/vmalert-rules.yaml"
+      - "-datasource.url=http://victoriametrics:8428"
+      - "-notifier.url=http://alertmanager:9093"
+      - "-remoteWrite.url=http://victoriametrics:8428"
+      - "-evaluationInterval=15s"
+      - "-external.url=http://localhost:8880"
+    volumes:
+      - ./config/vmalert-rules.yaml:/etc/vmalert-rules.yaml
+    networks:
+      - o11y-net
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    ports:
+      - "9093:9093"
+    networks:
+      - o11y-net
+
+  loki:
+    image: grafana/loki:latest
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - o11y-net
+
+  tempo:
+    image: grafana/tempo:latest
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "3200:3200"
+    networks:
+      - o11y-net
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+      - ./config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
+      - ./config/grafana-llm-provisioning.yaml:/etc/grafana/provisioning/plugins/llm.yaml
+      - ./dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/aiops-overview.json
+      # Offizielles Grafana-Plugin (Public Preview), das "Erklaere dieses Panel"
+      # und aehnliche Funktionen direkt in Grafana aktiviert. Zeigt auf unser
+      # bereits laufendes Ollama statt auf eine Cloud-API.
+      - GF_INSTALL_PLUGINS=grafana-llm-app
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-llm-app
+    depends_on:
+      - ollama
+    networks:
+      - o11y-net
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      # Modell dauerhaft geladen halten - ohne das erzwingt jede Chat-Anfrage
+      # nach Idle-Zeit einen erneuten Modell-Load (bei 1-3B spuerbar).
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=1
+    # Docker Desktop hat hier nur ~3,8 GB RAM insgesamt; dieses Limit ist ein
+    # Sicherheitsnetz, damit ein zu grosses Modell nur den Ollama-Container
+    # killt statt den ganzen Host unter Druck zu setzen.
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - o11y-net
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:1.5b}"]
+    networks:
+      - o11y-net
+
+  ai-analyst:
+    build: ./services/ai-analyst
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+    ports:
+      - "8090:8090"
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - VM_URL=http://victoriametrics:8428
+      - VMALERT_URL=http://vmalert:8880
+      - LOKI_URL=http://loki:3100
+      - TEMPO_URL=http://tempo:3200
+      - POC_API_URL=http://poc-api:8000
+      - STORE_API_URL=http://store-api:8001
+    networks:
+      - o11y-net
+
+  ml-anomaly:
+    build: ./services/ml-anomaly
+    depends_on:
+      - victoriametrics
+    environment:
+      - VM_URL=http://victoriametrics:8428
+      # Unter dem 5-Minuten-Staleness-Fenster von VictoriaMetrics halten -
+      # sonst sind die ml:*-Reihen fuer vmalert-Instant-Queries die meiste
+      # Zeit "verschwunden". Der Fit selbst dauert nur ~1-2s fuer alle Reihen.
+      - ML_INTERVAL_SECONDS=120
+      - ML_LOOKBACK_DAYS=21
+    networks:
+      - o11y-net
+
+networks:
+  o11y-net:
+    driver: bridge
+
+volumes:
+  # Das Langzeitgedaechtnis der Plattform. Ueberlebt Neustarts und
+  # "docker compose up --force-recreate".
+  vmdata:
+  # Modellgewichte von Ollama - ueberleben Neustarts, kein erneuter
+  # Download bei jedem "docker compose up".
+  ollama-data:

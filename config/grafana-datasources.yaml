@@ -1,0 +1,83 @@
+apiVersion: 1
+
+# Alte Eintraege zuerst entfernen, damit ein geaenderter uid/Name beim
+# Reprovisionieren nicht zu "Datasource provisioning error: data source not found" fuehrt.
+deleteDatasources:
+  - name: VictoriaMetrics
+    orgId: 1
+  - name: Loki
+    orgId: 1
+  - name: Tempo
+    orgId: 1
+
+datasources:
+  - name: VictoriaMetrics
+    uid: victoriametrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: true
+    jsonData:
+      timeInterval: '15s'
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # Der OTLP-Ingest von Loki legt trace_id als Structured Metadata ab.
+      # Damit wird aus jeder Logzeile ein Ein-Klick-Sprung in den passenden Trace.
+      derivedFields:
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          url: '${__value.raw}'
+          urlDisplayLabel: 'Trace oeffnen'
+          datasourceUid: tempo
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # Setzt "stream_over_http_enabled: true" in tempo.yaml voraus,
+      # sonst laeuft der gRPC-Kanal gegen den reinen HTTP-Port 3200.
+      streamingEnabled:
+        search: true
+        metrics: true
+
+      # Service-Map aus den vom Tempo-metrics_generator erzeugten Serien.
+      serviceMap:
+        datasourceUid: victoriametrics
+      nodeGraph:
+        enabled: true
+      spanBar:
+        type: 'Duration'
+
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-2m'
+        spanEndTimeShift: '2m'
+        filterByTraceID: true
+        filterBySpanID: false
+        tags:
+          - key: 'service.name'
+            value: 'service_name'
+
+      tracesToMetrics:
+        datasourceUid: victoriametrics
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        queries:
+          - name: 'Requests/s dieses Endpunkts'
+            query: 'sum(rate(traces_spanmetrics_calls_total{$$__tags}[5m]))'
+          - name: 'P95-Latenz dieses Endpunkts'
+            query: 'histogram_quantile(0.95, sum by (le) (rate(traces_spanmetrics_latency_bucket{$$__tags}[5m])))'
+        tags:
+          - key: 'service.name'
+            value: 'service'

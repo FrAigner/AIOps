@@ -1,0 +1,13 @@
+apiVersion: 1
+apps:
+  - type: grafana-llm-app
+    org_id: 1
+    disabled: false
+    jsonData:
+      openAI:
+        provider: custom
+        url: http://ollama:11434/v1
+    secureJsonData:
+      # Ollama prueft den Key nicht, aber die OpenAI-Client-Bibliothek im
+      # Plugin verlangt vermutlich ein nicht-leeres Feld.
+      openAIKey: "ollama-lokal-kein-key-noetig"
