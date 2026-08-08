@@ -4,6 +4,7 @@
   "name": "AIOps Assistant",
   "id": "aiops-aiopsassistant-app",
   "backend": false,
+  "preload": true,
   "info": {
     "keywords": ["app", "ai", "assistant", "chat"],
     "description": "KI-Analyse-Chat fuer die AIOps-Plattform, angebunden an ein austauschbares OpenAI-kompatibles LLM-Backend.",
@@ -39,5 +40,21 @@
   "dependencies": {
     "grafanaDependency": ">=12.3.0",
     "plugins": []
+  },
+  "extensions": {
+    "addedComponents": [
+      {
+        "targets": ["grafana/extension-sidebar/v0-alpha"],
+        "title": "AIOps Assistant",
+        "description": "KI-Analyse-Chat fuer die AIOps-Plattform"
+      }
+    ],
+    "addedLinks": [
+      {
+        "targets": ["grafana/commandpalette/action"],
+        "title": "✨ AIOps Assistant öffnen",
+        "description": "KI-Analyse-Chat oeffnen"
+      }
+    ]
   }
 }

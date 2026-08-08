@@ -179,6 +179,11 @@ services:
       # Erlaubt $GROQ_API_KEY-Platzhalter in grafana-llm-provisioning.yaml.
       - GF_ENABLE_ENVIRONMENT_VARIABLE_EXPANSION=true
       - GROQ_API_KEY=${GROQ_API_KEY}
+      # Standardmaessig deaktiviertes, experimentelles Feature: laesst
+      # App-Plugins Icons/Komponenten ins Grafana-Chrome haengen - u.a. den
+      # Sidebar-Toggle-Button fuer grafana/extension-sidebar/v0-alpha, ueber
+      # den unser aiops-aiopsassistant-app-Plugin rechts andockt.
+      - GF_FEATURE_TOGGLES_ENABLE=enableAppChromeExtensions
     networks:
       - o11y-net
 

@@ -1,13 +1,18 @@
-"use strict";(self.webpackChunkaiops_aiopsassistant_app=self.webpackChunkaiops_aiopsassistant_app||[]).push([[640],{611(e,t,a){a.d(t,["b",0,{appConfig:{chatBackendUrl:"data-testid ac-chat-backend-url",submit:"data-testid ac-submit-form"},assistantPage:{container:"data-testid assistant-page-container",input:"data-testid assistant-page-input",send:"data-testid assistant-page-send"}}])},640(e,t,a){a.r(t);var n=a(959),s=a.n(n),r=a(89),i=a(781),o=a(531),l=a(7),c=a(611);function d(e,t,a,n,s,r,i){try{var o=e[r](i),l=o.value}catch(e){return void a(e)}o.done?t(l):Promise.resolve(l).then(n,s)}function u(e){return function(){var t=this,a=arguments;return new Promise(function(n,s){var r=e.apply(t,a);function i(e){d(r,n,s,i,o,"next",e)}function o(e){d(r,n,s,i,o,"throw",e)}i(void 0)})}}const p=["Systemzustand zusammenfassen","Warum ist checkout gerade langsam?","Baue mir ein Dashboard mit Fehlerrate und Latenz von store-api"];const m=function(){var e,t;const a=(0,l.useStyles2)(f),r=(0,i.usePluginContext)(),d=((null!==(e=null==r||null===(t=r.meta)||void 0===t?void 0:t.jsonData)&&void 0!==e?e:{}).chatBackendUrl||"http://localhost:8090").replace(/\/$/,""),[m,g]=(0,n.useState)([]),[h,y]=(0,n.useState)(""),[b,x]=(0,n.useState)("Wird bei der ersten Frage geladen."),[v,$]=(0,n.useState)(!1),[k,w]=(0,n.useState)(null),E=e=>u(function*(){const t=e.trim();if(!t||v)return;w(null),$(!0);const a=[...m,{role:"user",content:t}];g(a),y("");try{const{reply:e,context:n}=yield function(e,t,a){return u(function*(){const n=yield fetch(`${e}/chat`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:t,history:a})});if(!n.ok)throw new Error(`Backend antwortete mit ${n.status}`);return n.json()})()}(d,t,m);g([...a,{role:"assistant",content:e}]),x(n)}catch(e){w(`Chat-Backend (${d}) nicht erreichbar: ${e instanceof Error?e.message:String(e)}. Backend-URL laesst sich unter Configuration anpassen.`)}finally{$(!1)}})();return s().createElement(o.PluginPage,null,s().createElement("div",{className:a.layout,"data-testid":c.b.assistantPage.container},s().createElement("div",{className:a.chatColumn},k&&s().createElement(l.Alert,{severity:"warning",title:"Verbindungsproblem"},k),0===m.length&&s().createElement("div",{className:a.examples},p.map(e=>s().createElement(l.Button,{key:e,variant:"secondary",size:"sm",onClick:()=>E(e),disabled:v},e))),s().createElement("div",{className:a.messages},m.map((e,t)=>s().createElement("div",{key:t,className:"user"===e.role?a.userBubble:a.assistantBubble},e.content)),v&&s().createElement("div",{className:a.assistantBubble},s().createElement(l.Icon,{name:"fa fa-spinner",className:a.spinner})," denkt nach ...")),s().createElement("div",{className:a.inputRow},s().createElement(l.TextArea,{"data-testid":c.b.assistantPage.input,placeholder:"Frage stellen...",value:h,rows:2,onChange:e=>y(e.currentTarget.value),onKeyDown:e=>{"Enter"!==e.key||e.shiftKey||(e.preventDefault(),E(h))}}),s().createElement(l.Button,{"data-testid":c.b.assistantPage.send,onClick:()=>E(h),disabled:v},"Senden"))),s().createElement("div",{className:a.contextColumn},s().createElement("div",{className:a.contextTitle},"Verwendeter Kontext"),s().createElement("pre",{className:a.contextText},b))))},f=e=>({layout:r.css`
+"use strict";(self.webpackChunkaiops_aiopsassistant_app=self.webpackChunkaiops_aiopsassistant_app||[]).push([[640],{278(e,t,a){var n=a(959),s=a.n(n),r=a(89),i=a(781),o=a(7),l=a(611);function c(e,t,a,n,s,r,i){try{var o=e[r](i),l=o.value}catch(e){return void a(e)}o.done?t(l):Promise.resolve(l).then(n,s)}function d(e){return function(){var t=this,a=arguments;return new Promise(function(n,s){var r=e.apply(t,a);function i(e){c(r,n,s,i,o,"next",e)}function o(e){c(r,n,s,i,o,"throw",e)}i(void 0)})}}const u=["Systemzustand zusammenfassen","Warum ist checkout gerade langsam?","Baue mir ein Dashboard mit Fehlerrate und Latenz von store-api"];const p=function({layout:e="wide"}){var t,a;const c=(0,o.useStyles2)(m),p=(0,i.usePluginContext)(),g=((null!==(t=null==p||null===(a=p.meta)||void 0===a?void 0:a.jsonData)&&void 0!==t?t:{}).chatBackendUrl||"http://localhost:8090").replace(/\/$/,""),[f,h]=(0,n.useState)([]),[y,x]=(0,n.useState)(""),[b,v]=(0,n.useState)("Wird bei der ersten Frage geladen."),[w,$]=(0,n.useState)(!1),[k,E]=(0,n.useState)(null),S=e=>d(function*(){const t=e.trim();if(!t||w)return;E(null),$(!0);const a=[...f,{role:"user",content:t}];h(a),x("");try{const{reply:e,context:n}=yield function(e,t,a){return d(function*(){const n=yield fetch(`${e}/chat`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:t,history:a})});if(!n.ok)throw new Error(`Backend antwortete mit ${n.status}`);return n.json()})()}(g,t,f);h([...a,{role:"assistant",content:e}]),v(n)}catch(e){E(`Chat-Backend (${g}) nicht erreichbar: ${e instanceof Error?e.message:String(e)}. Backend-URL laesst sich unter Configuration anpassen.`)}finally{$(!1)}})();return s().createElement("div",{className:(0,r.cx)(c.layout,"narrow"===e&&c.layoutNarrow),"data-testid":l.b.assistantPage.container},s().createElement("div",{className:c.chatColumn},k&&s().createElement(o.Alert,{severity:"warning",title:"Verbindungsproblem"},k),0===f.length&&s().createElement("div",{className:c.examples},u.map(e=>s().createElement(o.Button,{key:e,variant:"secondary",size:"sm",onClick:()=>S(e),disabled:w},e))),s().createElement("div",{className:c.messages},f.map((e,t)=>s().createElement("div",{key:t,className:"user"===e.role?c.userBubble:c.assistantBubble},e.content)),w&&s().createElement("div",{className:c.assistantBubble},s().createElement(o.Icon,{name:"fa fa-spinner",className:c.spinner})," denkt nach ...")),s().createElement("div",{className:c.inputRow},s().createElement(o.TextArea,{"data-testid":l.b.assistantPage.input,placeholder:"Frage stellen...",value:y,rows:2,onChange:e=>x(e.currentTarget.value),onKeyDown:e=>{"Enter"!==e.key||e.shiftKey||(e.preventDefault(),S(y))}}),s().createElement(o.Button,{"data-testid":l.b.assistantPage.send,onClick:()=>S(y),disabled:w},"Senden"))),s().createElement("div",{className:c.contextColumn},s().createElement("div",{className:c.contextTitle},"Verwendeter Kontext"),s().createElement("pre",{className:c.contextText},b)))},m=e=>({layout:r.css`
     display: flex;
     gap: ${e.spacing(2)};
-    height: calc(100vh - 200px);
+    height: 100%;
+    min-height: 0;
+  `,layoutNarrow:r.css`
+    flex-direction: column;
+    height: auto;
   `,chatColumn:r.css`
     flex: 2;
     display: flex;
     flex-direction: column;
     gap: ${e.spacing(1)};
     min-width: 0;
+    min-height: 300px;
   `,contextColumn:r.css`
     flex: 1;
     background: ${e.colors.background.secondary};
@@ -41,13 +46,13 @@
     color: ${e.colors.primary.contrastText};
     padding: ${e.spacing(1,1.5)};
     border-radius: ${e.shape.radius.default};
-    max-width: 80%;
+    max-width: 90%;
   `,assistantBubble:r.css`
     align-self: flex-start;
     background: ${e.colors.background.secondary};
     padding: ${e.spacing(1,1.5)};
     border-radius: ${e.shape.radius.default};
-    max-width: 80%;
+    max-width: 90%;
   `,inputRow:r.css`
     display: flex;
     gap: ${e.spacing(1)};
@@ -62,5 +67,7 @@
         transform: rotate(360deg);
       }
     }
-  `});a.d(t,["default",0,m])}}]);
-//# sourceMappingURL=640.js.map?_cache=5365896e2968def51ae1
+  `});a.d(t,["A",0,p])},611(e,t,a){a.d(t,["b",0,{appConfig:{chatBackendUrl:"data-testid ac-chat-backend-url",submit:"data-testid ac-submit-form"},assistantPage:{container:"data-testid assistant-page-container",input:"data-testid assistant-page-input",send:"data-testid assistant-page-send"}}])},640(e,t,a){a.r(t);var n=a(959),s=a.n(n),r=a(89),i=a(531),o=a(7),l=a(278);const c=function(){const e=(0,o.useStyles2)(d);return s().createElement(i.PluginPage,null,s().createElement("div",{className:e.wrapper},s().createElement(l.A,{layout:"wide"})))},d=e=>({wrapper:r.css`
+    height: calc(100vh - 200px);
+  `});a.d(t,["default",0,c])}}]);
+//# sourceMappingURL=640.js.map?_cache=449e2606d51d005e649d

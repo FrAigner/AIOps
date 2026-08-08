@@ -514,6 +514,28 @@ dafuer freigeschaltet ueber `ALLOWED_ORIGINS` in `docker-compose.yml`).
     -d '{"enabled": true, "pinned": true, "jsonData": {"chatBackendUrl": "http://localhost:8090"}}'
   ```
 
+**Rechte Sidebar wie beim echten Grafana Assistant – recherchiert, aber mit
+Grenze:** Das Plugin registriert seine Chat-Komponente korrekt am selben
+Extension-Point, den auch `grafana-assistant-app` benutzt
+(`grafana/extension-sidebar/v0-alpha`, verifiziert durch Analyse von dessen
+offiziellem Plugin-Bundle) – das Andocken selbst funktioniert also. Der
+permanente Sparkle-Icon-Slot oben rechts, der diese Sidebar beim echten
+Assistant öffnet, ist aber eine Grafana-Core-Sonderbehandlung exklusiv für
+diese eine Plugin-ID, kein generischer Mechanismus. Die beiden offiziell
+dokumentierten Alternativen für Drittanbieter-Plugins – ein Link am
+`NavRightButton`-Extension-Point und ein Eintrag in der Command Palette
+(`Cmd/Ctrl+K`) – sind in `module.tsx` implementiert und laut
+`grafanaBootData` korrekt registriert, rendern in der getesteten
+Grafana-Version 13.1.2 aber nicht (auch nicht nach Feature-Toggle
+`enableAppChromeExtensions` und Hard-Reload in einem frischen Tab). Die
+Sidebar-API trägt den Namenszusatz `v0-alpha` und ist bewusst aus der
+öffentlichen Doku ausgeblendet (`HideFromDocs: true` im Grafana-Quellcode)
+– vermutlich noch nicht für Drittanbieter freigegeben. Der Code bleibt
+trotzdem drin: sollte Grafana die Trigger-Rendering in einer künftigen
+Version freischalten, funktioniert es ohne weitere Änderung. Bis dahin ist
+die linke Navigation ("More apps → AIOps Assistant") bzw. die Suche
+(`Cmd/Ctrl+K` → "AIOps Assistant") der zuverlässige Zugang zum Chat.
+
 ### ML-gestützte Anomalie-Erkennung (`services/ml-anomaly`)
 
 Ergänzt (ersetzt nicht) die handgebaute PromQL-Heuristik aus dem Abschnitt
