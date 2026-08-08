@@ -402,32 +402,42 @@ Alarm-Historie ist grün, solange nichts feuert.
 
 ## KI-Integration
 
-Zwei zusätzliche Bausteine, beide lokal (kein API-Key, kein Internetzugriff im
-laufenden Betrieb – nur der einmalige Modell-Download braucht Netz):
+Drei Bausteine: ein eigener Analyse-Chat, ein in Grafana eingebettetes
+App-Plugin fuer denselben Chat, und das offizielle Grafana-LLM-Plugin. Alle
+drei sprechen mit einem austauschbaren, OpenAI-kompatiblen LLM-Backend
+(Standard: [Groq](https://console.groq.com/keys), kostenlos, kein lokaler
+RAM-Bedarf) statt einem lokal gehosteten Modell.
 
 ### KI-Analyse-Chat (`services/ai-analyst`, Port 8090)
 
 Ein Chat, in dem man in natürlicher Sprache fragen kann, z. B. „warum ist
-checkout gerade langsam?". Verlinkt im Panel „Demo-Steuerung" beider
-Dashboards.
+checkout gerade langsam?" oder „baue mir ein Dashboard mit Fehlerrate und
+Latenz von store-api". Verlinkt im Panel „Demo-Steuerung" beider Dashboards,
+und zusaetzlich als Grafana-App-Plugin erreichbar (siehe unten).
 
-**Architektur – bewusst kein reiner Agentic-Loop:** Das lokale Modell ist klein
-(1,5 Mrd. Parameter, siehe unten warum), und kleine Modelle rufen Tools
-unzuverlässig auf. Deshalb hängt die Grundqualität der Antwort nicht davon ab,
-ob das Modell ein Tool korrekt aufruft:
+**Architektur:**
 
 1. Bei jeder Anfrage wird zuerst **deterministisch** (kein Modellaufruf) ein
    Kontext-Bündel zusammengestellt: aktive/pending Alarme aus vmalert, SLIs
    beider Anwendungen (Traffic, Fehlerrate, P95, saisonales Verhältnis,
    gelernte Vergleichstage), die fünf langsamsten Downstream-Systeme, aktives
-   Chaos-Szenario. Dieses Bündel steht im Chat rechts sichtbar – Transparenz
-   ist bei einem so kleinen Modell wichtig, damit man sieht, worauf die
-   Antwort beruht.
-2. Zusätzlich bietet der Chat drei Tools für Drill-down an (`query_promql`,
-   `query_recent_logs`, `query_recent_traces` gegen VictoriaMetrics/Loki/Tempo),
-   die das Modell optional aufrufen kann. Ruft es keins oder ein fehlerhaftes
+   Chaos-Szenario. Dieses Bündel steht im Chat rechts sichtbar – Transparenz,
+   damit man sieht, worauf die Antwort beruht, unabhaengig davon wie gut das
+   angeschlossene Modell gerade ist.
+2. Zusätzlich bietet der Chat fuenf Tools an, die das Modell bei Bedarf
+   aufruft: `query_promql`, `query_recent_logs`, `query_recent_traces` fuer
+   Drill-down gegen VictoriaMetrics/Loki/Tempo, sowie `list_datasources` und
+   `create_or_update_dashboard`, mit denen der Chat live Grafana-Dashboards
+   anlegt oder aktualisiert (per Grafana-HTTP-API, `GRAFANA_URL` in
+   `docker-compose.yml`). Ruft das Modell keins oder ein fehlerhaftes Tool
    auf, bleibt die Antwort trotzdem brauchbar, weil das Kontext-Bündel schon
    im Prompt steht.
+   **Gemessene Einschraenkung:** freie PromQL-Strings sind ein
+   Halluzinations-Risiko - das Modell hat im Test einmal einen plausibel
+   klingenden, aber nicht existierenden Metriknamen erfunden. Die
+   Tool-Beschreibung listet deshalb explizit die bekannten Recording-Rule-Namen
+   (siehe `TOOL_SCHEMAS` in [`services/ai-analyst/tools.py`](services/ai-analyst/tools.py)),
+   was das Problem im Test behoben hat, aber keine harte Garantie ist.
 
 **Modellwahl:** `llama-3.3-70b-versatile` über die kostenlose
 [Groq-API](https://console.groq.com/keys) (OpenAI-kompatibel, Endpunkt
@@ -462,6 +472,47 @@ Die vorher dokumentierte Timeout-Problematik der Plugin-„Ein-Klick"-Features
 (z. B. „✨ Auto-generate") betraf das langsame CPU-only-Lokalmodell; mit
 Groqs deutlich kürzeren Antwortzeiten ist sie in der Praxis nicht mehr
 relevant, wurde hier aber nicht erneut nachgemessen.
+
+**Was das nicht ist:** der echte, cloud-basierte "Grafana Assistant"
+(Dashboards per Chat bauen etc., Plugin-ID `grafana-assistant-app`, seit
+April 2026 auch fuer selbst-gehostetes Grafana verfuegbar). Der erfordert
+einen Grafana-Cloud-Account und laut offizieller Doku dieselben
+Preise/Limits wie Grafana Cloud - kein kostenloser, rein lokaler Betrieb.
+`grafana-llm-app` hier ist Grafana Labs' separates, kostenloses Plugin fuer
+einzelne LLM-Features wie "Explain this panel".
+
+### Eigenes App-Plugin (`plugins/aiops-aiopsassistant-app`)
+
+Damit der Chat sich wie eine native Grafana-Funktion anfuehlt statt wie eine
+externe Seite, gibt es zusaetzlich ein echtes Grafana-App-Plugin (React/
+TypeScript, [`@grafana/create-plugin`](https://grafana.com/developers/plugin-tools/)-Scaffold)
+mit einer eigenen Seite in der linken Navigation ("AIOps Assistant"). Es ist
+reines Frontend - kein Backend-Plugin-Binary, kein zusaetzlicher Prozess: Es
+ruft `services/ai-analyst` direkt per `fetch()` aus dem Browser auf (CORS
+dafuer freigeschaltet ueber `ALLOWED_ORIGINS` in `docker-compose.yml`).
+
+- **Backend-URL konfigurierbar:** unter der Plugin-Configuration-Seite
+  (Admin) laesst sich die Chat-Backend-URL aendern - so kann das Plugin auch
+  gegen einen woanders laufenden `ai-analyst` zeigen.
+- **Unsigned Plugin:** wird per Docker-Volume direkt in Grafanas Plugin-Ordner
+  gemountet (`./plugins/aiops-aiopsassistant-app/dist`) und ueber
+  `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` freigeschaltet - fuer den
+  offiziellen Marketplace waere eine Signierung noetig.
+- **Nach Code-Aenderungen neu bauen:**
+  ```bash
+  cd plugins/aiops-aiopsassistant-app
+  npm install   # einmalig
+  npm run build
+  docker compose up -d grafana
+  ```
+- Beim allerersten Start muss das Plugin einmalig aktiviert werden (App-Plugins
+  starten deaktiviert, wenn sie nicht ueber `GF_INSTALL_PLUGINS` sondern per
+  Volume eingebunden sind):
+  ```bash
+  curl -X POST http://localhost:3000/api/plugins/aiops-aiopsassistant-app/settings \
+    -H "Content-Type: application/json" \
+    -d '{"enabled": true, "pinned": true, "jsonData": {"chatBackendUrl": "http://localhost:8090"}}'
+  ```
 
 ### ML-gestützte Anomalie-Erkennung (`services/ml-anomaly`)
 

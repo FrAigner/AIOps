@@ -1,0 +1,11 @@
+apiVersion: 1
+
+apps:
+  - type: 'aiops-aiopsassistant-app'
+    org_id: 1
+    org_name: 'aiops'
+    disabled: false
+    jsonData:
+      apiUrl: http://default-url.com
+    secureJsonData:
+      apiKey: secret-key

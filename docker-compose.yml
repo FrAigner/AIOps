@@ -158,6 +158,10 @@ services:
       - ./config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
       - ./config/grafana-llm-provisioning.yaml:/etc/grafana/provisioning/plugins/llm.yaml
       - ./dashboards:/var/lib/grafana/dashboards
+      # Eigenes App-Plugin (services/ai-analyst als Chat-Backend, siehe
+      # plugins/aiops-aiopsassistant-app). Unsigned, daher per Volume direkt
+      # in den Plugin-Ordner statt per GF_INSTALL_PLUGINS.
+      - ./plugins/aiops-aiopsassistant-app/dist:/var/lib/grafana/plugins/aiops-aiopsassistant-app
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -165,8 +169,13 @@ services:
       # Offizielles Grafana-Plugin (Public Preview), das "Erklaere dieses Panel"
       # und aehnliche Funktionen direkt in Grafana aktiviert. Zeigt per
       # grafana-llm-provisioning.yaml auf Groqs kostenlose OpenAI-kompatible API.
+      #
+      # (Nicht installiert: grafana-assistant-app, der "echte" Grafana
+      # Assistant. Der braucht einen Grafana-Cloud-Account und laut Doku
+      # dieselben Preise/Limits wie Grafana Cloud - kein lokaler Betrieb.
+      # plugins/aiops-aiopsassistant-app oben ist der kostenlose Ersatz dafuer.)
       - GF_INSTALL_PLUGINS=grafana-llm-app
-      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-llm-app
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-llm-app,aiops-aiopsassistant-app
       # Erlaubt $GROQ_API_KEY-Platzhalter in grafana-llm-provisioning.yaml.
       - GF_ENABLE_ENVIRONMENT_VARIABLE_EXPANSION=true
       - GROQ_API_KEY=${GROQ_API_KEY}
@@ -180,15 +189,25 @@ services:
     ports:
       - "8090:8090"
     environment:
-      # Kostenloser API-Key: https://console.groq.com/keys
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      # Provider-neutrales OpenAI-kompatibles Backend. Standard ist Groq
+      # (kostenlos, kein Login noetig: https://console.groq.com/keys), aber
+      # LLM_BASE_URL zeigt auf jeden chat-completions-kompatiblen Endpunkt
+      # (OpenAI, lokaler vLLM/llama.cpp-Server, ...).
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      - LLM_API_KEY=${GROQ_API_KEY}
+      - LLM_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      # Erlaubt dem Grafana-App-Plugin (Browser-Origin localhost:3000), diesen
+      # Dienst per fetch() anzusprechen.
+      - ALLOWED_ORIGINS=http://localhost:3000
       - VM_URL=http://victoriametrics:8428
       - VMALERT_URL=http://vmalert:8880
       - LOKI_URL=http://loki:3100
       - TEMPO_URL=http://tempo:3200
       - POC_API_URL=http://poc-api:8000
       - STORE_API_URL=http://store-api:8001
+      - GRAFANA_URL=http://grafana:3000
+      # Fuer Dashboard-Links im Chat - muss vom Browser aus erreichbar sein.
+      - GRAFANA_PUBLIC_URL=http://localhost:3000
     networks:
       - o11y-net
 

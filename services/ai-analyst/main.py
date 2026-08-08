@@ -1,15 +1,16 @@
-"""KI-Analyse-Chat: fragt Groq (kostenlose Cloud-LLM-API, OpenAI-kompatibel)
+"""KI-Analyse-Chat: fragt ein beliebiges OpenAI-kompatibles LLM-Backend
 ueber den Zustand der Plattform aus.
 
-Architekturentscheidung: Groq statt eines lokalen Modells, weil die
-verfuegbare Hardware (Docker Desktop, ~3,8 GB RAM insgesamt) fuer ein
+Architekturentscheidung: Cloud-/Remote-LLM statt eines lokalen Modells, weil
+die verfuegbare Hardware (Docker Desktop, ~3,8 GB RAM insgesamt) fuer ein
 Modell mit verlaesslichem Tool-Calling nicht ausreicht (siehe README fuer die
-gemessenen Grenzen des vorherigen Ollama-Setups). Groq stellt starke
-Open-Weight-Modelle (Llama 3.3 70B) kostenlos per API bereit und antwortet
-dank eigener LPU-Hardware in der Regel unter 1-2 Sekunden. Trotzdem bleibt
-das deterministisch zusammengestellte Kontext-Buendel (siehe context.py) die
-Grundlage jeder Antwort - Tools (tools.py) sind fuer Drill-down da, auf den
-sich das groessere Modell jetzt aber deutlich zuverlaessiger stuetzt.
+gemessenen Grenzen des vorherigen Ollama-Setups). Das Backend ist bewusst
+austauschbar (LLM_BASE_URL/LLM_API_KEY/LLM_MODEL) - Standard ist Groq
+(kostenlos, schnell), es funktioniert aber mit jedem OpenAI-/chat-completions-
+kompatiblen Endpunkt (OpenAI, lokaler vLLM/llama.cpp-Server, etc.). Trotzdem
+bleibt das deterministisch zusammengestellte Kontext-Buendel (siehe
+context.py) die Grundlage jeder Antwort - Tools (tools.py) sind fuer
+Drill-down da, auf den sich ein groesseres Modell zuverlaessig stuetzen kann.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import os
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -26,15 +28,19 @@ from pydantic import BaseModel
 from context import gather_context
 from tools import TOOL_SCHEMAS, run_tool
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-# llama-3.3-70b-versatile: kostenloses Kontingent bei Groq, zuverlaessig im
-# Function-Calling (im Gegensatz zum vorherigen 1,5B-Lokalmodell) und mit
-# 128K Kontextfenster grosszuegig genug fuer Kontext-Buendel + Tool-Antworten.
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "400"))
+# GROQ_* bleibt als Fallback, damit bestehende .env-Dateien weiterlaufen -
+# LLM_* ist der eigentliche, provider-neutrale Name.
+LLM_BASE_URL = (os.getenv("LLM_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
+LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("GROQ_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL") or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "400"))
 MAX_TOOL_ROUNDS = 3
 MAX_HISTORY_MESSAGES = 12  # Kontext-Buendel allein braucht schon einige hundert Tokens
+
+# Erlaubt dem Grafana-App-Plugin (im Browser unter localhost:3000 geladen),
+# diesen Dienst direkt per fetch() anzusprechen. Lokales PoC-Setup, daher
+# bewusst per Env-Var statt fest auf eine Origin beschraenkt.
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
 SYSTEM_PROMPT = (
     "Du bist der Analyse-Assistent eines Observability-Systems fuer einen "
@@ -44,11 +50,20 @@ SYSTEM_PROMPT = (
     "keine Wiederholung der Frage, keine Nebenbemerkungen - direkt die Antwort "
     "mit konkreten Zahlen aus dem gelieferten Kontext. Nutze die angebotenen "
     "Werkzeuge, wenn eine Frage Details verlangt, die im Kontext nicht stehen. "
-    "Wenn du unsicher bist, sag das in einem Satz, statt Zahlen zu erfinden "
-    "oder abzuschweifen."
+    "Wenn der Nutzer ausdruecklich ein Dashboard oder eine Visualisierung "
+    "erstellen moechte, rufe create_or_update_dashboard mit sinnvollen "
+    "PromQL-Ausdruecken auf (list_datasources zeigt die verfuegbaren Quellen) "
+    "und nenne danach den zurueckgegebenen Link. Wenn du unsicher bist, sag "
+    "das in einem Satz, statt Zahlen zu erfinden oder abzuschweifen."
 )
 
 app = FastAPI(title="AIOps Analyse-Chat")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):
@@ -61,21 +76,23 @@ class ChatResponse(BaseModel):
     context: str
 
 
-async def _groq_chat(messages: list[dict], use_tools: bool, timeout: float = 30) -> dict:
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY ist nicht gesetzt")
+async def _llm_chat(messages: list[dict], use_tools: bool, timeout: float = 30) -> dict:
+    if not LLM_API_KEY:
+        raise RuntimeError("LLM_API_KEY (bzw. GROQ_API_KEY) ist nicht gesetzt")
     payload = {
-        "model": GROQ_MODEL,
+        "model": LLM_MODEL,
         "messages": messages,
-        "max_tokens": GROQ_MAX_TOKENS,
+        "max_tokens": LLM_MAX_TOKENS,
         "temperature": 0.3,
     }
     if use_tools:
         payload["tools"] = TOOL_SCHEMAS
         payload["tool_choice"] = "auto"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}"}
     async with httpx.AsyncClient() as client:
-        r = await client.post(GROQ_URL, json=payload, headers=headers, timeout=timeout)
+        r = await client.post(
+            f"{LLM_BASE_URL}/chat/completions", json=payload, headers=headers, timeout=timeout
+        )
         r.raise_for_status()
         return r.json()
 
@@ -110,7 +127,7 @@ async def run_chat(user_message: str, history: list[dict]) -> tuple[str, str]:
 
     try:
         for _round in range(MAX_TOOL_ROUNDS):
-            data = await _groq_chat(messages, use_tools=True)
+            data = await _llm_chat(messages, use_tools=True)
             message = data["choices"][0]["message"]
             tool_calls = _extract_tool_calls(message)
 
@@ -126,28 +143,28 @@ async def run_chat(user_message: str, history: list[dict]) -> tuple[str, str]:
                 )
 
         # Letzter Versuch ohne Tools, damit das Modell nicht leer ausgeht.
-        data = await _groq_chat(messages, use_tools=False)
+        data = await _llm_chat(messages, use_tools=False)
         content = (data["choices"][0]["message"].get("content") or "").strip()
         return content or "Ich konnte dazu keine Antwort formulieren.", context_block
 
     except RuntimeError as exc:
         return (
-            f"Der KI-Chat ist nicht konfiguriert ({exc}). Bitte GROQ_API_KEY setzen "
-            "(kostenlos auf console.groq.com/keys). Der Systemzustand rechts ist "
-            "trotzdem aktuell.",
+            f"Der KI-Chat ist nicht konfiguriert ({exc}). Bitte LLM_API_KEY setzen "
+            "(z.B. kostenlos auf console.groq.com/keys). Der Systemzustand rechts "
+            "ist trotzdem aktuell.",
             context_block,
         )
     except httpx.HTTPStatusError as exc:
         detail = "ungueltiger API-Key" if exc.response.status_code == 401 else str(exc)
         return (
-            f"Groq-Anfrage fehlgeschlagen ({detail}). Der Systemzustand rechts ist "
+            f"LLM-Anfrage fehlgeschlagen ({detail}). Der Systemzustand rechts ist "
             "trotzdem aktuell.",
             context_block,
         )
     except httpx.HTTPError as exc:
         return (
-            f"Groq ist gerade nicht erreichbar ({exc}). Der Systemzustand rechts ist "
-            "trotzdem aktuell.",
+            f"LLM-Backend ist gerade nicht erreichbar ({exc}). Der Systemzustand "
+            "rechts ist trotzdem aktuell.",
             context_block,
         )
 
@@ -160,7 +177,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": GROQ_MODEL, "configured": bool(GROQ_API_KEY)}
+    return {"status": "ok", "model": LLM_MODEL, "base_url": LLM_BASE_URL, "configured": bool(LLM_API_KEY)}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

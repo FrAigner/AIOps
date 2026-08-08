@@ -15,6 +15,10 @@ import httpx
 VM_URL = os.getenv("VM_URL", "http://victoriametrics:8428")
 LOKI_URL = os.getenv("LOKI_URL", "http://loki:3100")
 TEMPO_URL = os.getenv("TEMPO_URL", "http://tempo:3200")
+GRAFANA_URL = os.getenv("GRAFANA_URL", "http://grafana:3000")
+# Fuer Links, die im Chat angezeigt werden - muss vom Browser des Nutzers aus
+# erreichbar sein, im Gegensatz zu GRAFANA_URL (nur im Docker-Netz aufloesbar).
+GRAFANA_PUBLIC_URL = os.getenv("GRAFANA_PUBLIC_URL", "http://localhost:3000")
 
 TOOL_SCHEMAS = [
     {
@@ -61,6 +65,65 @@ TOOL_SCHEMAS = [
                     "service": {"type": "string", "description": "Service-Name aus der Topologie, z.B. payment-provider-psp"},
                 },
                 "required": ["service"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_datasources",
+            "description": "Listet die in Grafana konfigurierten Datenquellen (Name, UID, Typ) auf.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_or_update_dashboard",
+            "description": (
+                "Erstellt ein neues Grafana-Dashboard oder aktualisiert ein bestehendes mit "
+                "gleichem Titel. Jedes Panel zeigt eine PromQL/MetricsQL-Zeitreihe aus "
+                "VictoriaMetrics. Nutze das, wenn der Nutzer explizit ein Dashboard oder "
+                "eine Visualisierung angelegt haben moechte. Erfinde KEINE Metriknamen - "
+                "nutze ausschliesslich diese bekannten Recording-Rules (job ist \"poc-api\" "
+                "oder \"store-api\"): poc:requests:rate5m, poc:error_ratio:5m, "
+                "poc:latency_p95:5m, poc:requests:seasonal_ratio, "
+                "poc:business_txn:seasonal_ratio, poc:learning:profile_days. Fuer alles "
+                "andere zuerst query_promql zum Testen nutzen."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Titel des Dashboards"},
+                    "panels": {
+                        "type": "array",
+                        "description": "Ein bis sechs Panels fuer das Dashboard",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Panel-Titel"},
+                                "expr": {
+                                    "type": "string",
+                                    "description": (
+                                        "PromQL/MetricsQL-Ausdruck mit einem der bekannten "
+                                        "Metriknamen, z.B. poc:latency_p95:5m{job=\"poc-api\"}"
+                                    ),
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "description": "Grafana-Einheit, z.B. 'ms', 'percent', 'reqps'. Optional, Standard 'short'.",
+                                },
+                                "panel_type": {
+                                    "type": "string",
+                                    "enum": ["timeseries", "stat"],
+                                    "description": "Panel-Typ. Optional, Standard 'timeseries'.",
+                                },
+                            },
+                            "required": ["title", "expr"],
+                        },
+                    },
+                },
+                "required": ["title", "panels"],
             },
         },
     },
@@ -135,10 +198,87 @@ async def query_recent_traces(service: str, **_) -> str:
         return f"Trace-Suche fehlgeschlagen: {exc}"
 
 
+async def list_datasources(**_) -> str:
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{GRAFANA_URL}/api/datasources", timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        if not data:
+            return "Keine Datenquellen konfiguriert."
+        return "\n".join(f"{d['name']} (uid={d['uid']}, typ={d['type']})" for d in data)
+    except Exception as exc:
+        return f"Datenquellen-Abfrage fehlgeschlagen: {exc}"
+
+
+async def _find_dashboard_uid(client: httpx.AsyncClient, title: str) -> str | None:
+    r = await client.get(
+        f"{GRAFANA_URL}/api/search", params={"query": title, "type": "dash-db"}, timeout=10
+    )
+    r.raise_for_status()
+    for item in r.json():
+        if item.get("title") == title:
+            return item.get("uid")
+    return None
+
+
+def _build_panel(index: int, spec: dict) -> dict | None:
+    title = spec.get("title")
+    expr = spec.get("expr")
+    if not title or not expr:
+        return None
+    panel_type = spec.get("panel_type") if spec.get("panel_type") in ("timeseries", "stat") else "timeseries"
+    unit = spec.get("unit") or "short"
+    datasource_ref = {"type": "prometheus", "uid": "victoriametrics"}
+    return {
+        "id": index + 1,
+        "type": panel_type,
+        "title": title,
+        "gridPos": {"h": 8, "w": 12, "x": (index % 2) * 12, "y": (index // 2) * 8},
+        "datasource": datasource_ref,
+        "targets": [{"expr": expr, "refId": "A", "datasource": datasource_ref}],
+        "fieldConfig": {"defaults": {"unit": unit}, "overrides": []},
+    }
+
+
+async def create_or_update_dashboard(title: str, panels: list[dict] | None = None, **_) -> str:
+    if not title:
+        return "Fehler: Titel fehlt."
+    grafana_panels = [p for p in (_build_panel(i, spec) for i, spec in enumerate(panels or [])) if p]
+    if not grafana_panels:
+        return "Fehler: mindestens ein gueltiges Panel mit 'title' und 'expr' wird benoetigt."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            existing_uid = await _find_dashboard_uid(client, title)
+            dashboard = {
+                "id": None,
+                "uid": existing_uid,
+                "title": title,
+                "panels": grafana_panels,
+                "schemaVersion": 39,
+                "time": {"from": "now-6h", "to": "now"},
+                "refresh": "30s",
+            }
+            r = await client.post(
+                f"{GRAFANA_URL}/api/dashboards/db",
+                json={"dashboard": dashboard, "overwrite": True},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+        verb = "aktualisiert" if existing_uid else "erstellt"
+        return f"Dashboard '{title}' {verb}: {GRAFANA_PUBLIC_URL}{data.get('url', '')}"
+    except Exception as exc:
+        return f"Dashboard-Erstellung fehlgeschlagen: {exc}"
+
+
 DISPATCH = {
     "query_promql": query_promql,
     "query_recent_logs": query_recent_logs,
     "query_recent_traces": query_recent_traces,
+    "list_datasources": list_datasources,
+    "create_or_update_dashboard": create_or_update_dashboard,
 }
 
 

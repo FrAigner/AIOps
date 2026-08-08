@@ -1,0 +1,2 @@
+"use strict";(self.webpackChunkaiops_aiopsassistant_app=self.webpackChunkaiops_aiopsassistant_app||[]).push([[462],{462(e,t,a){a.r(t);var n=a(959),s=a.n(n),l=a(159);const p=s().lazy(()=>a.e(640).then(a.bind(a,640)));const u=function(e){return s().createElement(l.Routes,null,s().createElement(l.Route,{path:"*",element:s().createElement(p,null)}))};a.d(t,["default",0,u])}}]);
+//# sourceMappingURL=462.js.map?_cache=366914f21b46ca5ae6ab

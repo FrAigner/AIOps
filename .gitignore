@@ -10,8 +10,16 @@ __pycache__/
 env/
 venv/
 *.egg-info/
-dist/
-build/
+
+# Grafana app plugin (plugins/aiops-aiopsassistant-app) - dist/ IS committed
+# (it's what Grafana loads, no build step in Docker), only the toolchain
+# noise is excluded.
+plugins/*/node_modules/
+plugins/*/coverage/
+plugins/*/test-results/
+plugins/*/playwright-report/
+plugins/*/blob-report/
+plugins/*/.eslintcache
 
 # IDE
 .vscode/

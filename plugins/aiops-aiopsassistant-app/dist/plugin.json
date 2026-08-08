@@ -1,0 +1,49 @@
+{
+    "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+    "type": "app",
+    "name": "AIOps Assistant",
+    "id": "aiops-aiopsassistant-app",
+    "backend": false,
+    "info": {
+        "keywords": [
+            "app",
+            "ai",
+            "assistant",
+            "chat"
+        ],
+        "description": "KI-Analyse-Chat fuer die AIOps-Plattform, angebunden an ein austauschbares OpenAI-kompatibles LLM-Backend.",
+        "author": {
+            "name": "Aiops"
+        },
+        "logos": {
+            "small": "img/logo.svg",
+            "large": "img/logo.svg"
+        },
+        "screenshots": [],
+        "version": "1.0.0",
+        "updated": "2026-08-08"
+    },
+    "includes": [
+        {
+            "type": "page",
+            "name": "AI Assistant",
+            "path": "/a/aiops-aiopsassistant-app/",
+            "icon": "comment-alt",
+            "addToNav": true,
+            "defaultNav": true
+        },
+        {
+            "type": "page",
+            "icon": "cog",
+            "name": "Configuration",
+            "path": "/plugins/aiops-aiopsassistant-app",
+            "role": "Admin",
+            "addToNav": true
+        }
+    ],
+    "dependencies": {
+        "grafanaDependency": ">=12.3.0",
+        "plugins": []
+    },
+    "buildMode": "production"
+}
