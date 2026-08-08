@@ -6,8 +6,15 @@ apps:
     jsonData:
       openAI:
         provider: custom
-        url: http://ollama:11434/v1
+        url: https://api.groq.com/openai/v1
+        # Modellname, der bei "Explain this panel" o.ae. verwendet wird.
+        # Muss in Grafana zusaetzlich einmalig unter Administration ->
+        # Plugins and data -> Plugins -> LLM -> Configuration nachgetragen
+        # werden - das Feld laesst sich aus der Provisioning-Datei allein
+        # nicht vollstaendig setzen.
+        organizationId: ""
     secureJsonData:
-      # Ollama prueft den Key nicht, aber die OpenAI-Client-Bibliothek im
-      # Plugin verlangt vermutlich ein nicht-leeres Feld.
-      openAIKey: "ollama-lokal-kein-key-noetig"
+      # $GROQ_API_KEY wird durch GF_ENABLE_ENVIRONMENT_VARIABLE_EXPANSION=true
+      # (siehe docker-compose.yml) zur Laufzeit aus der Umgebungsvariable
+      # ersetzt - der eigentliche Key steht nirgends im Repo.
+      openAIKey: "$GROQ_API_KEY"

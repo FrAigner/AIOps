@@ -20,6 +20,8 @@ build/
 *.swo
 
 # Project-specific
-ollama-data/
 vmdata/
 .claude/
+
+# Secrets
+.env

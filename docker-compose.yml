@@ -163,61 +163,26 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/aiops-overview.json
       # Offizielles Grafana-Plugin (Public Preview), das "Erklaere dieses Panel"
-      # und aehnliche Funktionen direkt in Grafana aktiviert. Zeigt auf unser
-      # bereits laufendes Ollama statt auf eine Cloud-API.
+      # und aehnliche Funktionen direkt in Grafana aktiviert. Zeigt per
+      # grafana-llm-provisioning.yaml auf Groqs kostenlose OpenAI-kompatible API.
       - GF_INSTALL_PLUGINS=grafana-llm-app
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-llm-app
-    depends_on:
-      - ollama
-    networks:
-      - o11y-net
-
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama-data:/root/.ollama
-    ports:
-      - "11434:11434"
-    environment:
-      # Modell dauerhaft geladen halten - ohne das erzwingt jede Chat-Anfrage
-      # nach Idle-Zeit einen erneuten Modell-Load (bei 1-3B spuerbar).
-      - OLLAMA_KEEP_ALIVE=-1
-      - OLLAMA_MAX_LOADED_MODELS=1
-      - OLLAMA_NUM_PARALLEL=1
-    # Docker Desktop hat hier nur ~3,8 GB RAM insgesamt; dieses Limit ist ein
-    # Sicherheitsnetz, damit ein zu grosses Modell nur den Ollama-Container
-    # killt statt den ganzen Host unter Druck zu setzen.
-    mem_limit: 2g
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-    networks:
-      - o11y-net
-
-  ollama-pull:
-    image: ollama/ollama:latest
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      - OLLAMA_HOST=ollama:11434
-    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:1.5b}"]
+      # Erlaubt $GROQ_API_KEY-Platzhalter in grafana-llm-provisioning.yaml.
+      - GF_ENABLE_ENVIRONMENT_VARIABLE_EXPANSION=true
+      - GROQ_API_KEY=${GROQ_API_KEY}
     networks:
       - o11y-net
 
   ai-analyst:
     build: ./services/ai-analyst
     depends_on:
-      ollama-pull:
-        condition: service_completed_successfully
+      - victoriametrics
     ports:
       - "8090:8090"
     environment:
-      - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      # Kostenloser API-Key: https://console.groq.com/keys
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - VM_URL=http://victoriametrics:8428
       - VMALERT_URL=http://vmalert:8880
       - LOKI_URL=http://loki:3100
@@ -249,6 +214,3 @@ volumes:
   # Das Langzeitgedaechtnis der Plattform. Ueberlebt Neustarts und
   # "docker compose up --force-recreate".
   vmdata:
-  # Modellgewichte von Ollama - ueberleben Neustarts, kein erneuter
-  # Download bei jedem "docker compose up".
-  ollama-data:

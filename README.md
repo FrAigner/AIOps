@@ -4,9 +4,18 @@ Lokaler Proof of Concept: OpenTelemetry-Pipeline plus AIOps-Dashboards für eine
 simulierte Handelslandschaft – Onlineshop und stationäre Filiale – komplett per
 Docker Compose auf macOS.
 
+**Voraussetzung fuer den KI-Chat:** ein kostenloser API-Key von
+[console.groq.com/keys](https://console.groq.com/keys), eingetragen in eine
+lokale `.env`-Datei (Vorlage: `.env.example`):
+
 ```bash
+cp .env.example .env
+# GROQ_API_KEY=... in .env eintragen
 docker compose up -d --build
 ```
+
+Ohne Key startet der Rest der Plattform trotzdem normal, nur der Chat unter
+Port 8090 antwortet dann mit einem Konfigurationshinweis statt einer Analyse.
 
 Grafana läuft danach auf <http://localhost:3000> (anonymer Zugang, keine
 Anmeldung). Zwei Dashboards im Ordner **AIOps**:
@@ -76,7 +85,7 @@ VictoriaMetrics <── remote_write ── Tempo metrics_generator ────
       │
       ├─> vmalert (Recording Rules, Anomalieerkennung, Alerts) ──> Alertmanager
       ├─> ml-anomaly (MSTL-Zeitreihenzerlegung) ──> schreibt ml:*-Vorhersagen zurueck
-      ├─> ai-analyst (Chat, liest VM/Loki/Tempo/vmalert) ──> Ollama (lokales LLM)
+      ├─> ai-analyst (Chat, liest VM/Loki/Tempo/vmalert) ──> Groq (kostenlose Cloud-LLM-API)
       └─> Grafana (Metriken, Logs, Traces, Service-Landkarte)
 ```
 
@@ -92,7 +101,6 @@ VictoriaMetrics <── remote_write ── Tempo metrics_generator ────
 | Alertmanager | 9093 | Alarm-Zustellung |
 | otel-collector | 4317/4318 | OTLP-Eingang (gRPC / HTTP) |
 | **ai-analyst** | **8090** | **KI-Analyse-Chat** (siehe unten) |
-| Ollama | 11434 | Lokales LLM-Backend fuer den Chat |
 
 ## Demo-Ablauf
 
@@ -421,50 +429,39 @@ ob das Modell ein Tool korrekt aufruft:
    auf, bleibt die Antwort trotzdem brauchbar, weil das Kontext-Bündel schon
    im Prompt steht.
 
-**Modellwahl:** `qwen2.5:1.5b` (Ollama, Docker-Volume `ollama-data`, überlebt
-Neustarts). Kein größeres Modell, weil Docker Desktop hier nur **~3,8 GB RAM**
-insgesamt zugewiesen hat und die restlichen 13 Container davon bereits
-knapp 2 GB belegen – ein 7-8B-Modell hätte nicht zuverlässig gepasst. Qwen2.5
-wurde gewählt, weil es über die gesamte Größenreihe konsistent für
-Function-Calling trainiert ist (laut Ollama-Bibliothek), zuverlässiger als
-vergleichbar kleine Alternativen.
+**Modellwahl:** `llama-3.3-70b-versatile` über die kostenlose
+[Groq-API](https://console.groq.com/keys) (OpenAI-kompatibel, Endpunkt
+`https://api.groq.com/openai/v1`). Vorher lief hier ein lokales 1,5B-Modell
+per Ollama – Docker Desktop stellt in dieser Umgebung nur **~3,8 GB RAM**
+insgesamt bereit, ein Modell dieser Größenklasse hätte dort nicht zuverlässig
+Platz gehabt, und Tool-Calling war bei 1,5 Mrd. Parametern nicht verlässlich
+(deshalb das deterministische Kontext-Bündel als Fundament, siehe oben). Groq
+löst beide Probleme: kein lokaler RAM-Bedarf, und ein 70B-Modell ruft die
+angebotenen Tools deutlich zuverlässiger auf.
 
-**Gemessene Grenzen, nicht schöngeredet:**
-
-- CPU-only-Inferenz auf dieser Hardware ist langsam. Ohne Deckel driftete das
-  Modell bei einer einfachen Testfrage („Sag nur OK.") in eine seitenlange,
-  thematisch danebenliegende Erklärung ab – 89 Sekunden für drei sinnlose
-  Wörter. Gegenmaßnahme: `num_predict=150` (hartes Token-Limit) plus ein
-  System-Prompt, der explizit maximal drei Sätze verlangt. Mit dieser Bremse
-  liegt eine reale Antwort bei rund **20 Sekunden** (warmes Modell,
-  `OLLAMA_KEEP_ALIVE=-1` hält es dauerhaft geladen).
-- Tool-Calling ist bei 1,5 Mrd. Parametern nicht verlässlich – deshalb das
-  Kontext-Bündel als Fundament statt als Nebenrolle.
-- Ist Ollama nicht erreichbar oder läuft in einen Timeout, liefert der Chat
-  trotzdem den reinen Kontext-Bündel-Text zurück statt eines Fehlers.
+- Ist `GROQ_API_KEY` nicht gesetzt oder Groq nicht erreichbar, liefert der
+  Chat trotzdem den reinen Kontext-Bündel-Text zurück statt eines Fehlers
+  (siehe `run_chat()` in [`services/ai-analyst/main.py`](services/ai-analyst/main.py)).
+- Groqs kostenloses Kontingent hat ein Rate-Limit pro Minute/Tag; für eine
+  Demo-Session reicht das komfortabel, für Dauerbetrieb lohnt ein Blick auf
+  [console.groq.com](https://console.groq.com) für aktuelle Limits.
 
 ### KI direkt in Grafana (`grafana-llm-app`)
 
 Zusätzlich ist das offizielle Grafana-Plugin `grafana-llm-app` installiert
 (`GF_INSTALL_PLUGINS` in `docker-compose.yml`) und über
 [`config/grafana-llm-provisioning.yaml`](config/grafana-llm-provisioning.yaml)
-auf unser Ollama verdrahtet – **Administration → Plugins and data → Plugins →
-LLM → Configuration** zeigt „LLM provider health check succeeded!", die
-Verbindung ist also echt. Provider-Auswahl und Modellname (`qwen2.5:1.5b`)
-mussten einmalig per UI nachgetragen werden, das ließ sich aus der
+auf dieselbe Groq-API verdrahtet wie der eigene Chat – der API-Key kommt zur
+Laufzeit per `GF_ENABLE_ENVIRONMENT_VARIABLE_EXPANSION` aus derselben
+`GROQ_API_KEY`-Umgebungsvariable, steht also nirgends im Repo. Provider-Wahl
+und Modellname müssen einmalig per UI nachgetragen werden (**Administration →
+Plugins and data → Plugins → LLM → Configuration**), das lässt sich aus der
 Provisioning-Datei allein nicht vollständig setzen.
 
-**Ehrlich gemessene Grenze:** Die komfortablen „Ein-Klick"-Features des
-Plugins (z. B. „✨ Auto-generate" für Panel-Titel/-Beschreibung im
-Panel-Editor) haben ein hartes, client-seitiges Timeout – bei uns nach 25
-Sekunden mit `context canceled` im Grafana-Log fehlgeschlagen. Das ist keine
-Fehlkonfiguration: Andere Nutzer melden [in einem offenen,
-unbeantworteten Community-Thread](https://community.grafana.com/t/is-there-anyway-to-increase-the-default-timeout-for-grafana-llm-plugin/140557)
-dasselbe Problem (dort schon nach 10s), ohne dokumentierte Lösung. Unser
-CPU-only-Modell braucht 20-90s – strukturell über dem, was das Plugin
-toleriert. Der eigene Chat unter Port 8090 (siehe oben, 150s Timeout) bleibt
-deshalb die verlässliche Oberfläche; das Plugin beweist, dass die technische
-Anbindung echt ist, taugt aber mit diesem Modell nicht für eine flüssige Demo.
+Die vorher dokumentierte Timeout-Problematik der Plugin-„Ein-Klick"-Features
+(z. B. „✨ Auto-generate") betraf das langsame CPU-only-Lokalmodell; mit
+Groqs deutlich kürzeren Antwortzeiten ist sie in der Praxis nicht mehr
+relevant, wurde hier aber nicht erneut nachgemessen.
 
 ### ML-gestützte Anomalie-Erkennung (`services/ml-anomaly`)
 
